@@ -1,17 +1,25 @@
 from typing import *
+from unicodedata import normalize
 from warnings import warn
-from pandasql import sqldf
-from scipy import stats
-from rdkit import Chem
+import string
+import itertools
+
 from tabulate import tabulate
 from .utils import *
 from tqdm import notebook
 
+from scipy import stats
 import numpy as np
 import pandas as pd
+from pandasql import sqldf
 import sqlite3
+
+import matplotlib.cm as cm
 import matplotlib.pyplot as plt
-import string
+from matplotlib.colors import Normalize
+from cairosvg import svg2png
+
+from rdkit import Chem
 
 
 class polymers:
@@ -32,6 +40,8 @@ class polymers:
         self.printTable = printTable
 
         self._import(csvfile, database, table)
+        self.zscores = None
+        self.aliases = False
 
     def query(
         self,
@@ -69,7 +79,7 @@ class polymers:
         relSize = 100.0 * (len(self.sample) / len(self.data))
         return relSize
 
-    def zscores(self) -> None:
+    def getZscores(self) -> None:
         sample = self.sample
         totals = [self.all_monomers.count(x) for x in self.unique_monomers]
         scores = []
@@ -87,16 +97,96 @@ class polymers:
 
     def display(
         self,
+        k: int = 8,
         plot: bool = True,
+        log_y: bool = True,
         table: bool = True,
+        top_only: bool = True,
+        fragment_grid: bool = True,
+        per_row: int = 8,
+        aliases: Union[str, List[str]] = None,
         table_style: str = "github",
-        k: int = 12,
     ) -> None:
-        print(
-            "\n" + tabulate(self.zscores, headers="keys", tablefmt=table_style) + "\n"
-        )
+        """Display the zscore data as specified by the user, as a table plot or
+        both with the top k values.
+        In future, heatmap for zscores over a range of ranges/conditions?
 
-    def _import(self, csv, db, tab) -> None:
+        Args:
+        -----
+            k: specify how many zscores should be displayed, from the largest
+            plot: specify if a plot of zscores should be displayed
+            table: specify whether a table of zscores should be displayed
+            aliases: list of aliases for the SMILES strings, to make the outputs
+                easier to decipher. If provided, aliases will replace the tick
+                labels on the plot, but are added as a third column in the table
+                Can be 'auto', in which case they will be assigned names such as
+                'A1', 'A2' etc.
+            per_row: number of molecules drawn per row in fragment_grid. Also
+                defines the naming scheme for auto aliases i.e. per_row = 8:
+                A1 -> A8; B1 -> B8 etc.
+            table_style: the style of table, from the `tabulate' module
+
+        Returns:
+        --------
+            None: None
+
+        """
+        if not plot and not table:
+            warn("No display style selected.")
+
+        if aliases:
+            self._process_aliases(aliases, per_row)
+            aliases = self.zscores.alias.to_list()
+            self.aliases = True
+
+        if fragment_grid:
+            mols = [Chem.MolFromSmiles(m) for m in list(self.unique_monomers)]
+            img = Chem.Draw.MolsToGridImage(
+                mols=mols,
+                molsPerRow=per_row,
+                useSVG=True,
+                legends=aliases,
+                maxMols=len(self.unique_monomers),
+            )
+
+            svg2png(bytestring=img.data, write_to="../fragments.png")
+
+        self.zscores.sort_values(by=["zscore"], ascending=False, inplace=True)
+        scores = self.zscores.zscore.to_list()
+        if aliases:
+            ids = self.zscores.alias.to_list()
+        else:
+            ids = self.zscores.monomer.to_list()
+
+        if table:
+            printable = self.zscores
+            print(
+                "\n"
+                + tabulate(
+                    printable,
+                    headers="keys",
+                    tablefmt=table_style,
+                    showindex=False,
+                )
+                + "\n"
+            )
+        data = dict(zip(ids, scores))
+        if plot:
+            self._show_plot(
+                data=data,
+                k=k,
+                top_only=top_only,
+                save=False,
+                figsize=(8, 6),
+                log_y=log_y,
+            )
+
+    def _import(
+        self,
+        csv: str = None,
+        db: str = None,
+        tab: str = None,
+    ) -> None:
         """Import the data from either a specified CSV file of from a table in a
         sqlite3 database; the CSV will have priority.
         Check the data for ascii_uppercase column names.
@@ -132,7 +222,14 @@ class polymers:
         self.all_monomers = [
             brushTeeth(m) for m in [s for col in monomers for s in col]
         ]
-        self.unique_monomers = list(set(self.all_monomers))
+
+        tot = list(self.all_monomers)
+        unq = []
+        for m in tot:
+            if m not in unq:
+                unq.append(m)
+
+        self.unique_monomers = unq
 
         data.insert(0, "ID", range(0, len(data)))
         self.data = data
@@ -178,7 +275,10 @@ class polymers:
         self.sample = sample
 
     def _compute_frag_zscore(
-        self, frag_id: Union[str, int], subpop: pd.DataFrame, total: int
+        self,
+        frag_id: Union[str, int],
+        subpop: pd.DataFrame,
+        total: int,
     ) -> float:
         """Compute zscores for a given fragment.
 
@@ -219,3 +319,79 @@ class polymers:
             var = n * k * (N - k) * (N - n) / (N ** 2 * (N - 1)) + 1e-30
         z = (x - mean) / var
         return z
+
+    def _process_aliases(
+        self,
+        aliases: Union[str, dict] = None,
+        per_row: int = 8,
+    ) -> None:
+        if "alias" in self.zscores.columns:
+            return None
+        labels = []
+        if type(aliases) is dict:
+            labels = aliases
+        elif aliases == "auto":
+            letts = list(string.ascii_uppercase)
+            length = len(self.zscores)
+            if length > per_row * 26:
+                letts = itertools.combinations_with_replacement(letts, 2)
+            i, j, = (
+                0,
+                1,
+            )
+            for x in range(length):
+                labels.append(f"{letts[i]}{str(j)}")
+                j += 1
+                if j > per_row:
+                    i += 1
+                    j = 1
+        else:
+            raise Exception("Aliases must be dict type or 'auto'.")
+        if len(labels) != len(self.zscores):
+            print("Houston, we have a problem")
+        else:
+            self.zscores.insert(1, "alias", labels)
+
+    def _show_plot(
+        self,
+        data: dict,
+        k: int = None,
+        top_only: bool = True,
+        save: Union[str, bool] = None,
+        figsize: Tuple[int, int] = (8, 6),
+        log_y: bool = False,
+    ) -> None:
+        # data = {v: u for v, u in sorted(data.items(), key=lambda x: x[1])}
+        ids = list(data.keys())
+        scores = list(data.values())
+        if k:
+            ids = ids[:k] + ids[-k:]
+            scores = scores[:k] + scores[-k:]
+
+        if top_only:
+            ids = ids[:k]
+            scores = scores[:k]
+
+        scores = scores[::-1]
+        ids = ids[::-1]
+
+        color_map = cm.get_cmap("RdYlGn")
+        normalization = Normalize(vmin=-max(scores), vmax=max(scores))
+        clr = color_map(normalization(scores))
+
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+        ax.bar(
+            ids,
+            scores,
+            color=clr,
+            width=0.4,
+            log=log_y,
+        )
+        ax.set_ylabel("z-score (std. dev.)")
+        if not self.aliases:
+            plt.xticks(rotation=90)
+        plt.tight_layout()
+        if save:
+            plt.savefig(save)
+        plt.show()
