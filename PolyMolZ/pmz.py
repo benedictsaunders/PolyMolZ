@@ -3,6 +3,8 @@ from unicodedata import normalize
 from warnings import warn
 import string
 import itertools
+import re
+from numpy.lib.arraysetops import unique
 
 from tabulate import tabulate
 from .utils import *
@@ -79,7 +81,28 @@ class polymers:
         relSize = 100.0 * (len(self.sample) / len(self.data))
         return relSize
 
-    def getZscores(self) -> None:
+    # def iterative_query(
+    #     self,
+    #     iterator: Union[list, iter, np.array] = None,
+    #     vars: Union[int, float, List[Union[int, float]]] = None,
+    #     func: function = None,
+    # ):
+    #     def same(x):
+    #         return x
+
+    #     if not func:
+    #         func = same
+
+    #     for p in iterator:
+    #         pass
+
+    def getZscores(self, aliases="auto") -> None:
+        """Calculation of zscores by iterating over the unique monomers
+
+        Returns:
+        --------
+            scores
+        """
         sample = self.sample
         totals = [self.all_monomers.count(x) for x in self.unique_monomers]
         scores = []
@@ -93,7 +116,11 @@ class polymers:
             scores.append(self._compute_frag_zscore(frag_id, sample, totals[i]))
             i += 1
         zscores["zscore"] = scores
+        print(scores)
         self.zscores = zscores
+        self._process_aliases(aliases=aliases)
+        aliases = zscores.alias.to_list()
+        return aliases, np.array(scores)
 
     def display(
         self,
@@ -149,17 +176,20 @@ class polymers:
                 maxMols=len(self.unique_monomers),
             )
 
-            svg2png(bytestring=img.data, write_to="../fragments.png")
-
-        self.zscores.sort_values(by=["zscore"], ascending=False, inplace=True)
-        scores = self.zscores.zscore.to_list()
+            svg2png(bytestring=img.data, write_to="fragments.png")
+        disp_zscores = self.zscores.sort_values(
+            by=["zscore"],
+            ascending=False,
+            inplace=False,
+        )
+        scores = disp_zscores.zscore.to_list()
         if aliases:
-            ids = self.zscores.alias.to_list()
+            ids = disp_zscores.alias.to_list()
         else:
-            ids = self.zscores.monomer.to_list()
+            ids = disp_zscores.monomer.to_list()
 
         if table:
-            printable = self.zscores
+            printable = disp_zscores
             print(
                 "\n"
                 + tabulate(
@@ -180,6 +210,10 @@ class polymers:
                 figsize=(8, 6),
                 log_y=log_y,
             )
+
+    def heatmap(self) -> None:
+        zscores = self.zscores
+        pass
 
     def _import(
         self,
